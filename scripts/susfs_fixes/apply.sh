@@ -7,6 +7,8 @@
 # 调用前必须将工作目录设为 $KERNEL_ROOT
 set -eo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo "应用 SUSFS 补丁..."
 
 SUSFS_PATCH="50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch"
@@ -71,11 +73,10 @@ if [[ "$ANDROID_VERSION" == "android13" && "$KERNEL_VERSION" == "5.15" ]]; then
     fi
     adjust_legacy_fdinfo_context
   fi
-  if [[ "$OS_PATCH_LEVEL" == "lts" ]]; then
-    echo "临时调整 Android 13 5.15 LTS 头文件上下文"
-    sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
-    sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
-  fi
+  # 5.15.220(LTS) 原生含 #include <trace/hooks/{mm,blk}.h>。上游 rebase 后
+  # 主补丁已把这两行当作 susfs_def.h 插入 hunk 的上下文，旧版「先删后补」的
+  # 临时调整反而会让 hunk 整段被拒，故不再删除；缺失上下文的版本由
+  # normalize_trace_ctx.py 归一化补丁副本处理。
 fi
 
 if [[ "$ANDROID_VERSION" == "android14" && "$KERNEL_VERSION" == "6.1" ]]; then
@@ -104,11 +105,70 @@ if [[ "$ANDROID_VERSION" == "android15" && "$KERNEL_VERSION" == "6.6" ]]; then
   fi
 fi
 
+# 6.12 主补丁的 fs/exec.c 首个 hunk 以 `#include <linux/dma-buf.h>`（紧跟 ksm.h）
+# 作为插入 susfs_def.h 的上下文锚点。GKI 6.12.58+ 的 exec.c 原生就是这个形态，
+# 补丁可直接匹配；6.12.23~38 没有这行 dma-buf.h，hunk 会被整段拒绝，exec.c 因此
+# 缺少 susfs_def.h，do_execveat_common() 里的 susfs_is_current_proc_no_su()
+# 变成隐式声明，clang -Werror 直接中断编译。
+# 仅当源码缺少该上下文时改写补丁副本：丢掉这行陈旧上下文并重算 hunk 行数；
+# 源码本身不做任何增删（原「先删 dma-buf.h、事后补到文件头」的错位调整已移除）。
+normalize_exec_include_hunk() {
+  python3 - "$SUSFS_PATCH" <<'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+src = open("fs/exec.c", encoding="utf-8", errors="surrogateescape").read()
+if "#include <linux/ksm.h>\n#include <linux/dma-buf.h>" in src:
+    print("fs/exec.c 原生含 dma-buf.h 锚点，主补丁可直接匹配，跳过归一化")
+    raise SystemExit(0)
+
+with open(path, encoding="utf-8", errors="surrogateescape") as f:
+    lines = f.read().splitlines()
+
+hdr = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+out, i, dropped = [], 0, 0
+
+while i < len(lines):
+    line = lines[i]
+    m = hdr.match(line)
+    if not m:
+        out.append(line)
+        i += 1
+        continue
+
+    j = i + 1
+    body = []
+    while j < len(lines) and not lines[j].startswith(("@@", "diff --git")):
+        body.append(lines[j])
+        j += 1
+
+    # 只处理「插入 susfs_def.h 且以 dma-buf.h 为上下文」的那个 hunk
+    if any(l.strip() == "#include <linux/dma-buf.h>" for l in body) \
+            and any("susfs_def.h" in l for l in body):
+        kept = [l for l in body if l.strip() != "#include <linux/dma-buf.h>"]
+        dropped += len(body) - len(kept)
+        old = sum(1 for l in kept if l[:1] in (" ", "-"))
+        new = sum(1 for l in kept if l[:1] in (" ", "+"))
+        line = "@@ -%s,%d +%s,%d @@" % (m.group(1), old, m.group(3), new)
+        body = kept
+
+    out.append(line)
+    out.extend(body)
+    i = j
+
+if dropped:
+    with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.write("\n".join(out) + "\n")
+    print("fs/exec.c 补丁上下文已归一化（移除 %d 行陈旧 dma-buf 上下文）" % dropped)
+else:
+    print("fs/exec.c 补丁上下文无需归一化")
+PYEOF
+}
+
 if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
-  if [[ "$CURRENT_SUB" -ge 58 ]]; then
-    echo "临时调整 Android 16 6.12 exec.c 上下文"
-    sed -i '/^#include <linux\/dma-buf.h>$/d' fs/exec.c
-  fi
+  echo "归一化 Android 16 6.12 主补丁的 fs/exec.c 头文件上下文"
+  normalize_exec_include_hunk
 fi
 
 # 新版内核在 super.c 的 internal.h 之后新增了 trace/hooks/fs.h，
@@ -122,6 +182,12 @@ if grep -q '^ static int thaw_super_locked' "$SUSFS_PATCH" \
   sed -i '/^#include <trace\/hooks\/fs.h>$/,+1d' fs/super.c
   SUPER_FS_H_REMOVED=1
 fi
+
+# 上游 rebase 到 5.15.211 后，susfs_def.h 的插入 hunk 把 trace/hooks 头文件
+# 当成了上下文：5.15.74~194 源码没有这些行，hunk 会整段被拒，最终因
+# SUSFS_IS_INODE_* 隐式声明在 clang -Werror 处中断。按源码实际内容归一化补丁副本。
+echo "归一化 SUSFS 头文件上下文"
+python3 "$SCRIPT_DIR/normalize_trace_ctx.py" "$SUSFS_PATCH"
 
 patch -p1 < "$SUSFS_PATCH" || true
 
@@ -203,6 +269,20 @@ PYEOF
     || { echo "::error::services.c 跳板符号追加后校验失败"; exit 1; }
   echo "services.c: 已提供 context_struct_compute_av_fn / security_dump_masked_av_fn"
 fi
+
+# ==================== KernelSU 缺失的 SUSFS 内联钩子符号（6.6+/6.12 主补丁形态）====================
+# 6.6/6.12 主补丁在 security/selinux/{hooks,selinuxfs}.c 内联改写调用点，要求 KernelSU 侧
+# 以全局符号提供 my_setprocattr / my_write_context / my_write_access；并在 fs/exec.c 调用
+# ksu_setup_preinit_file / ksu_preinit_handle_post_execveat（受 KSU_NO_PREINIT 开关控制）。
+# SukiSU-Ultra（builtin 5ef32ad / main 31255c4）两者都不提供，KPM+SUSFS 的 6.12 构建在
+# vmlinux 链接阶段报：
+#   ld.lld: error: undefined symbol: my_setprocattr / my_write_context / my_write_access
+#   ld.lld: error: undefined symbol: ksu_setup_preinit_file / ksu_preinit_handle_post_execveat
+# 处理：按 KernelSU 实际能力裁剪（SELinux 包装函数回落到内核原生处理函数、preinit 走主补丁
+# 自带开关），保留 SUSFS 其余功能；KernelSU 上游补齐后脚本按内容检测自动跳过，幂等。
+echo "按 KernelSU 实际能力裁剪 SUSFS 内联钩子..."
+python3 "$SCRIPT_DIR/ksu_susfs_hooks.py" "$KERNEL_ROOT" \
+  || { echo "::error::SUSFS 内联钩子裁剪失败"; exit 1; }
 
 # ==================== FinaSU 新 selinux_hide 模型适配 ====================
 # 自 FinaSU v0.1.0-preview1 起，kernel/feature/selinux_hide.c 换成了 tiann 新形态：
@@ -477,7 +557,76 @@ if [[ -f fs/proc/task_mmu.c.rej ]] \
       echo "::error::show_smap SUS_MAP 检查手工补丁失败，请人工核对 fs/proc/task_mmu.c"
       exit 1
     fi
-    rm -f fs/proc/task_mmu.c.rej
+  fi
+
+  # 同一个文件在 6.12.69+ 还把 show_smaps_rollup 重写成 VMA_ITERATOR + for_each_vma
+  # （删掉了 out_unlock 分支），主补丁那两段 hunk 依赖旧上下文全部被拒；虽然不影响
+  # 编译，但 SUS_MAP 标记的 VMA 会经 /proc/<pid>/smaps_rollup 泄露。这里在 do 循环
+  # 入口整段跳过该 VMA，并同步 last_vma_end，语义与主补丁的 bypass_orig_flow 一致。
+  if grep -qF 'bypass_orig_flow' fs/proc/task_mmu.c.rej \
+    && ! sed -n '/^static int show_smaps_rollup(struct seq_file \*m, void \*v)/,/^}/p' fs/proc/task_mmu.c \
+      | grep -qF 'SUSFS_IS_INODE_SUS_MAP'; then
+    echo "为 show_smaps_rollup 手工补入 SUS_MAP 跳过逻辑（6.12.69+ 上下文漂移）"
+    python3 - <<'PYEOF'
+p = "fs/proc/task_mmu.c"
+s = open(p, encoding="utf-8", errors="surrogateescape").read()
+start = s.find("static int show_smaps_rollup(struct seq_file *m, void *v)")
+end = s.find("\n}\n", start)
+if start < 0 or end < 0:
+    print("::error::fs/proc/task_mmu.c: 未找到 show_smaps_rollup")
+    raise SystemExit(1)
+body = s[start:end]
+needle = "\tdo {\n\t\tsmap_gather_stats(vma, &mss, 0);\n"
+insert = (
+    "\tdo {\n"
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
+    "\t\t/* SUS_MAP 标记的 VMA 整体跳过，避免 rollup 中泄露 */\n"
+    "\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {\n"
+    "\t\t\tlast_vma_end = vma->vm_end;\n"
+    "\t\t\tcontinue;\n"
+    "\t\t}\n"
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
+    "\t\tsmap_gather_stats(vma, &mss, 0);\n"
+)
+if "SUSFS_IS_INODE_SUS_MAP" in body:
+    print("show_smaps_rollup 已含 SUS_MAP 检查，跳过")
+elif body.count(needle) != 1:
+    print("::error::show_smaps_rollup 循环入口形态不是预期，跳过")
+    raise SystemExit(1)
+else:
+    s = s[:start] + body.replace(needle, insert, 1) + s[end:]
+    open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
+    print("show_smaps_rollup: 已补入 SUS_MAP 跳过逻辑")
+PYEOF
+    if ! sed -n '/^static int show_smaps_rollup(struct seq_file \*m, void \*v)/,/^}/p' fs/proc/task_mmu.c \
+      | grep -qF 'SUSFS_IS_INODE_SUS_MAP'; then
+      echo "::error::show_smaps_rollup SUS_MAP 跳过逻辑手工补丁失败，请人工核对 fs/proc/task_mmu.c"
+      exit 1
+    fi
+  fi
+
+  # 拒绝内容已全部补齐，删除 .rej，避免继续污染 Rejects 产物
+  TASK_MMU_UNRESOLVED=0
+  if grep -qF 'bypass_orig_flow' fs/proc/task_mmu.c.rej \
+    && ! sed -n '/^static int show_smaps_rollup(struct seq_file \*m, void \*v)/,/^}/p' fs/proc/task_mmu.c \
+      | grep -qF 'SUSFS_IS_INODE_SUS_MAP'; then
+    TASK_MMU_UNRESOLVED=1
+  fi
+  if grep -qF 'static int show_smap(struct seq_file *m, void *v)' fs/proc/task_mmu.c.rej \
+    && ! sed -n '/^static int show_smap(struct seq_file \*m, void \*v)/,/^}/p' fs/proc/task_mmu.c \
+      | grep -qF 'SUSFS_IS_INODE_SUS_MAP'; then
+    TASK_MMU_UNRESOLVED=1
+  fi
+  if [[ "$TASK_MMU_UNRESOLVED" -eq 0 ]]; then
+    # 仅当拒绝内容全部落在已处理的两个函数上时才删除，避免掩盖新出现的漂移
+    UNKNOWN_HUNK="$(grep '^@@' fs/proc/task_mmu.c.rej | grep -vE 'show_smap|show_smaps_rollup' || true)"
+    if [[ -z "$UNKNOWN_HUNK" ]]; then
+      echo "fs/proc/task_mmu.c 拒绝内容已全部补齐，剔除 .rej"
+      rm -f fs/proc/task_mmu.c.rej
+    else
+      echo "::warning title=task_mmu 冲突::仍有未识别的 hunk，保留 .rej 供排查："
+      echo "$UNKNOWN_HUNK"
+    fi
   fi
 fi
 
@@ -594,13 +743,6 @@ if [[ "$ANDROID_VERSION" == "android15" && "$KERNEL_VERSION" == "6.6" ]]; then
   fi
 fi
 
-if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
-  if [[ "$CURRENT_SUB" -ge 58 ]] && ! grep -qF '#include <linux/dma-buf.h>' fs/exec.c; then
-    echo "还原 Android 16 6.12 exec.c 临时调整"
-    sed -i '0,/^#include /s//#include <linux\/dma-buf.h>\n&/' fs/exec.c
-  fi
-fi
-
 if [[ -n "$SUPER_FS_H_REMOVED" ]] \
   && ! grep -qF '#include <trace/hooks/fs.h>' fs/super.c; then
   echo "还原 super.c 临时调整"
@@ -673,3 +815,14 @@ if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
     echo "已修复 setuid_hook.c 重复定义问题"
   fi
 fi
+
+# 守护：主补丁若再次因上下文漂移漏掉 susfs_def.h，在这里给出可读错误，
+# 而不是等到编译 fs/proc/task_mmu.c 时才报一串 SUSFS_IS_INODE_* 隐式声明
+for SUSFS_SRC in fs/proc/task_mmu.c fs/namespace.c; do
+  [[ -f "$SUSFS_SRC" ]] || continue
+  if grep -qE 'SUSFS_IS_INODE_|CL_COPY_MNT_NS' "$SUSFS_SRC" \
+    && ! grep -qF '#include <linux/susfs_def.h>' "$SUSFS_SRC"; then
+    echo "::error::$SUSFS_SRC 使用了 SUSFS 宏但缺少 linux/susfs_def.h，主补丁 hunk 未应用"
+    exit 1
+  fi
+done
