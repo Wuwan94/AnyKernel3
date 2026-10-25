@@ -21,9 +21,7 @@
 Built upon [AnyKernel3](https://github.com/osm0sis/AnyKernel3), this repository uses GitHub Actions to automatically compile Android GKI kernels. It integrates multiple KernelSU variants and SUSFS kernel-level spoofing solutions Add practical patches such as ZRAM and BBG.
 
 - The build workflows are adapted from [zzh20188/GKI_KernelSU_SUSFS](https://github.com/zzh20188/GKI_KernelSU_SUSFS) and [Wild Kernels](https://github.com/WildKernels/GKI_KernelSU_SUSFS)
-- Flashing compatibility: **matching the kernel version alone is not sufficient.** Check the device, Android/KMI generation, firmware, page size, module ABI and boot-image format before flashing. A completed build is not a device boot test; keep a verified stock-image recovery path.
-
-> Fork scope (checked 2026-10-21): this is `Wuwan94/AnyKernel3`. The release badge above belongs to the upstream project; it does not certify a release or device test of this fork. Select a workflow in this fork and inspect its own run artifacts.
+- Flashing rule: ***It can be flashed as long as the kernel version matches.***
 
 ## 📦 Supported Kernel Versions
 
@@ -41,6 +39,7 @@ Built upon [AnyKernel3](https://github.com/osm0sis/AnyKernel3), this repository 
 | Feature | Description |
 |:---|:---|
 | 🔐 KernelSU Variants | Supports SukiSU / BakaSU / FinaSU variants, selectable at build time |
+| 🔀 Build Channel | Release: latest **stable** upstream Release (tag commit + same-version manager), falls back to the newest official default-branch build when the upstream only ships pre-releases; Latest: pins the default-branch HEAD and picks the newest manager build matching that version |
 | 🙈 SUSFS | Kernel-level hiding working with KSU to complete environment spoofing |
 | 💾 ZRAM LZ4 | ZRAM Compression Algorithm Patch |
 | 🛡️ BBG (Baseband Guard) | BBG patch to protect the baseband partitions from accidental wipe |
@@ -57,11 +56,13 @@ Built upon [AnyKernel3](https://github.com/osm0sis/AnyKernel3), this repository 
 1. **Fork this repository** (or use it directly)
 2. Go to the **Actions** page and pick the workflow for your kernel version
 3. Click **Run workflow** and fill in the parameters as needed:
-   - The Android/kernel generation is selected by the workflow above. The custom workflow exposes its own source/version fields; use the fields shown by that workflow.
-   - `kernelsu_variant`: KernelSU variant (SukiSU / BakaSU / FinaSU; default BakaSU). `ksu_variant` is an internal reusable-workflow input, not the manual selector.
-   - `cancel_susfs`: **disable** SUSFS when true; false by default. The reusable build receives `enable_susfs = !cancel_susfs`.
-   - Optional switches include `use_zram`, `use_bbg`, `use_net_enhance` and `skip_incompatible`. `use_kpm` is a choice (`disabled (关闭)`, `enabled (开启)` or `patched (开启并修补)`), documented by the workflow as SukiSU-only.
-   - `artifact_upload_mode`: defaults to `仅上传 AnyKernel3.zip`; choose `上传全部` to request the additional image outputs.
+   - `android_version` / `kernel_version` / `sub_level` / `os_patch_level`
+   - `ksu_variant`: KernelSU variant (SukiSU / BakaSU / FinaSU)
+   - `build_channel`: build channel
+     - `正式 (Release)`: manager APK taken from the latest **stable** upstream Release (`prerelease=false`) and the kernel pinned to that release tag commit, so manager and kernel versions match exactly; when the upstream only ships rc/pre-releases (e.g. BakaSU), the newest official default-branch build is used and pinned instead
+     - `最新 (HEAD)`: kernel pinned to the default-branch HEAD, and the manager is the newest build whose version matches HEAD (any branch; SukiSU / BakaSU use official CI builds, FinaSU uses the latest Release), so kernel and manager never drift apart
+     - Both channels print the selected channel, pinned commit and manager version in the logs and the run summary
+   - Feature switches: `enable_susfs`, `use_zram`, `use_bbg`, `use_net_enhance`, `use_kpm`, `skip_incompatible`, etc.
 4. Once the build finishes, download the **Artifacts** from the run page:
    - `AnyKernel3.zip` — flashable zip (recommended; flash via custom Recovery or KSU)
    - `boot.img` / `boot-gz.img` / `boot-lz4.img` — boot images for each compression format
@@ -105,7 +106,7 @@ A commit is a hash string representing the state of a repository at a certain po
 
 </div>
 
-- Flashing may affect warranty eligibility depending on the manufacturer and local terms, and may brick the device. Please make sure to:
+- Flashing this kernel will not void your warranty, but there is always a risk of bricking your device. Please make sure to:
 - 💾 Back up your data
 - 🧠 Understand the risks before proceeding
 
@@ -140,7 +141,7 @@ A commit is a hash string representing the state of a repository at a certain po
 本仓库基于 [AnyKernel3](https://github.com/osm0sis/AnyKernel3) 构建，通过 GitHub Actions 自动编译 **Android GKI 内核**，集成多种 KernelSU 变体与 SUSFS 内核级隐藏方案并附加 ZRAM、BBG等实用补丁。
 
 - 构建工作流修改自 [zzh20188/GKI_KernelSU_SUSFS](https://github.com/zzh20188/GKI_KernelSU_SUSFS) 与 [Wild Kernels](https://github.com/WildKernels/GKI_KernelSU_SUSFS)
-- 刷入兼容性：**仅内核版本相同不能证明可刷。** 请核对机型、Android/KMI 代际、固件、页大小、模块 ABI 与 boot 镜像格式。构建成功不等于真机开机验证；刷前保留可用的原厂镜像与恢复方式。
+- 刷入规则：***只要内核版本匹配即可刷入***
 
 ## 📦 支持的内核版本
 
@@ -158,6 +159,7 @@ A commit is a hash string representing the state of a repository at a certain po
 | 特性 | 说明 |
 |:---|:---|
 | 🔐 KernelSU 变体 | 支持 SukiSU / BakaSU / FinaSU 变体，构建时按需选择 |
+| 🔀 构建通道 | 正式：上游最新**正式版** Release（标签提交 + 同版本管理器），上游只有预发布版时改用官方默认分支最新上传构建；最新：锁定默认分支 HEAD，管理器取与 HEAD 版本一致的最新构建 |
 | 🙈 SUSFS | 内核级隐藏，配合 KSU 完成环境伪装 |
 | 💾 ZRAM LZ4 | ZRAM 压缩算法补丁 |
 | 🛡️ BBG 基带保护 | BBG（BaseBand Guard）补丁，保护基带分区，防止基带被意外擦除 |
@@ -174,11 +176,13 @@ A commit is a hash string representing the state of a repository at a certain po
 1. **Fork 本仓库**（或直接使用本仓库）
 2. 进入 **Actions** 页面，选择对应内核版本的工作流
 3. 点击 **Run workflow**，按需填写参数：
-   - Android/内核代际由所选工作流决定；自定义工作流有自己的源码/版本字段，以对应运行表单为准。
-   - `kernelsu_variant`：KernelSU 变体（SukiSU / BakaSU / FinaSU，默认 BakaSU）；`ksu_variant` 是内部可复用工作流参数，不是手动选择器。
-   - `cancel_susfs`：设为 true 是**关闭** SUSFS，默认 false；内部传递 `enable_susfs = !cancel_susfs`。
-   - 可选开关有 `use_zram`、`use_bbg`、`use_net_enhance`、`skip_incompatible` 等。`use_kpm` 是三选一（`disabled (关闭)`、`enabled (开启)`、`patched (开启并修补)`），工作流说明仅 SukiSU 支持。
-   - `artifact_upload_mode` 默认 `仅上传 AnyKernel3.zip`，需要额外镜像产物时选择 `上传全部`。
+   - `android_version` / `kernel_version` / `sub_level` / `os_patch_level`
+   - `ksu_variant`：KernelSU 变体（SukiSU / BakaSU / FinaSU）
+   - `build_channel`：构建通道
+     - `正式 (Release)`：使用上游最新**正式版** Release（`prerelease=false`）的管理器 APK，内核检出该 Release 标签的同一提交，版本严格一致；上游只有 rc/预发布版时（如 BakaSU），改用官方默认分支最新上传构建并锁定该提交
+     - `最新 (HEAD)`：内核锁定默认分支 HEAD，管理器取与 HEAD 版本号一致的最新构建（不限分支，SukiSU / BakaSU 用官方 CI 构建，FinaSU 用最新 Release），避免内核与管理器版本错位
+     - 两个通道的日志与运行摘要（Summary）都会打印实际选用的通道、提交与管理器版本
+   - 功能开关：`enable_susfs`、`use_zram`、`use_bbg`、`use_net_enhance`、`use_kpm`、`skip_incompatible` 等 
 4. 构建完成后，在本次运行页面下载 **Artifacts**：
    - `AnyKernel3.zip` —— 卡刷包（推荐，配合自定义 Recovery 或 KSU 刷入）
    - `boot.img` / `boot-gz.img` / `boot-lz4.img` —— 每种压缩格式的 boot 镜像
@@ -223,7 +227,7 @@ A commit is a hash string representing the state of a repository at a certain po
 
 </div>
 
-- 刷入可能影响保修资格，具体取决于厂商和当地条款，并存在设备变砖的风险。请务必:
+- 刷入内核不会使保修失效，但总有设备变砖的风险请务必:
 - 💾 备份你的数据
 - 🧠 在继续之前，了解风险
 
