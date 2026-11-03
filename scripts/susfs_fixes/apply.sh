@@ -622,6 +622,17 @@ if [[ -f fs/susfs.c ]] && grep -qF 'security_sb_statfs(' fs/susfs.c \
   sed -i '0,/^#include <linux\/fs.h>$/s//#include <linux\/fs.h>\n#include <linux\/security.h>/' fs/susfs.c
 fi
 
+# FinaSU 选用 SUSFS Inline hook 后端时，susfs.c 里的 susfs_switch_to_ksu_domain /
+# susfs_restore_creds 不再被调用，clang -Werror,-Wunused-function 会直接报错；标记为 __maybe_unused
+if [[ -f fs/susfs.c ]]; then
+  for FN in susfs_switch_to_ksu_domain susfs_restore_creds; do
+    if grep -qE "^static [^(]*\b${FN}\(" fs/susfs.c && ! grep -qE "^static __maybe_unused [^(]*\b${FN}\(" fs/susfs.c; then
+      sed -i -E "s/^static ([^(]*\b${FN}\()/static __maybe_unused \1/" fs/susfs.c
+      echo "fs/susfs.c: ${FN} 已标记 __maybe_unused"
+    fi
+  done
+fi
+
 # 在编译前报告 SUSFS 主补丁产生的冲突文件
 SUSFS_REJ_COUNT=$(find . -name '*.rej' | wc -l)
 if [ "$SUSFS_REJ_COUNT" -gt 0 ]; then
