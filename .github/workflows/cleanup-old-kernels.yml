@@ -1,0 +1,41 @@
+name: 清理旧内核产物
+
+# 任一内核构建成功后，删除之前所有构建留下的产物（内核包、管理器、susfs），只保留最新这一次。
+# 构建失败不会触发，旧产物保留。单独成文件，不改上游工作流，同步上游不会冲突。
+
+on:
+  workflow_run:
+    workflows:
+      - "Android 内核构建-自定义"
+      - "构建内核"
+      - "内核构建 - Android 12 (5.10)"
+      - "内核构建 - Android 13 (5.15)"
+      - "内核构建 - Android 14 (6.1)"
+      - "内核构建 - Android 15 (6.6)"
+      - "内核构建 - Android 16 (6.12)"
+    types: [completed]
+
+permissions:
+  actions: write
+
+concurrency:
+  group: cleanup-old-kernels
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 删除旧产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_RUN: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" \
+            --jq ".artifacts[] | select(.workflow_run.id != $KEEP_RUN) | \"\(.id) \(.name)\"" |
+          while read -r id name; do
+            echo "删除: $name ($id)"
+            gh api -X DELETE "repos/$REPO/actions/artifacts/$id" || echo "失败: $id"
+          done
